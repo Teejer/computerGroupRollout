@@ -1,0 +1,110 @@
+# Computer Group Rollout
+
+PowerShell tooling to roll out a GPO change gradually by adding computer
+accounts from a list of OUs to a security group in small batches, one batch
+per day, instead of the whole fleet picking up the GPO at once.
+
+## How it works with GPO
+
+This repo is designed to be used together with a Group Policy Object:
+
+1. The GPO is created and linked as usual, but its **Security Filtering** is
+   limited to a specific security group (the target group used by this
+   script) instead of `Authenticated Users`.
+2. Only computers that are members of that group apply (and be affected by)
+   the GPO.
+3. This script adds computers to the group **5 at a time** (configurable),
+   once per run, when scheduled as a daily task.
+
+The result is a slow, staged rollout: instead of every computer in every OU
+applying the new policy within one or two policy refresh cycles of each
+other, only a handful of machines pick it up each day, so problems are
+caught early with minimal blast radius.
+
+## Usage
+
+```powershell
+# Daily run (e.g. from Windows Task Scheduler)
+.\Add-ComputersToGroup.ps1 -GroupName "Deny-Login"
+
+# Start the whole rollout over from the first OU
+.\Add-ComputersToGroup.ps1 -GroupName "Deny-Login" -ResetState
+```
+
+Requires the ActiveDirectory (RSAT) PowerShell module and must run on a
+machine with permissions to read computer accounts and write to the target
+group's membership.
+
+## OU list (ous.csv)
+
+One OU per row, in the exact order they should be rolled out. The first
+column is used. OU distinguished names only:
+
+```csv
+Ou
+"OU=Laptops,DC=contoso,DC=com"
+"OU=Desktops,DC=contoso,DC=com"
+"OU=Workstations,OU=Engineering,DC=contoso,DC=com"
+```
+
+The script always works through the list from top to bottom: an OU is only
+touched once every computer in the OUs above it has been handled.
+
+## Parameters
+
+| Parameter        | Default                        | Description                                        |
+| ---------------- | ------------------------------ | -------------------------------------------------- |
+| `-GroupName`     | (required)                     | Target security group.                             |
+| `-CsvPath`       | `.\ous.csv`                    | Ordered list of OUs.                               |
+| `-BatchSize`     | `5`                            | Computers added per run.                           |
+| `-SortBy`        | `Name`                         | Property used to order computers within an OU.     |
+| `-IncludeSubOus` | off                            | Also pick up computers in child OUs.               |
+| `-StatePath`     | `.\state.json`                 | Progress file between runs.                        |
+| `-LogPath`       | `.\Add-ComputersToGroup.log`   | General activity log.                              |
+| `-AddLogPath`    | `.\added-computers.log`        | One record per successful add.                     |
+| `-ErrorLogPath`  | `.\add-errors.log`             | One record per failure.                            |
+| `-ResetState`    | off                            | Delete progress and start over.                    |
+
+Log file names get a monthly stamp appended automatically, e.g.
+`added-computers_2026_09.log`, so logs roll over each month.
+
+## Logs and state
+
+- `state.json` — tracks the current OU position plus processed and failed
+  computer accounts so each daily run knows where it left off. Failed
+  computers are recorded and skipped on later runs so they never block the
+  rollout.
+- `added-computers_yyyy_MM.log` — CSV: timestamp, group name, group DN,
+  computer name, computer DN, for every computer added.
+- `add-errors_yyyy_MM.log` — CSV: same fields plus error message, error id,
+  and script location for every failure.
+
+Computers already in the group are skipped and do not count toward the
+daily batch.
+
+## Files
+
+```
+Add-ComputersToGroup.ps1      Main script (entry point / orchestration)
+ous.csv                       Ordered OU list (edit for your environment)
+libs/
+  Get-OuListFromCsv.ps1       Reads and validates the OU list
+  Get-ScriptState.ps1         Loads progress from state.json
+  Save-ScriptState.ps1        Persists progress to state.json
+  Get-NextComputers.ps1       Ordered, not-yet-processed computers in an OU
+  Add-ComputerToGroup.ps1     Membership check + add for one computer
+  Write-Log.ps1               General timestamped logging
+  Write-AddLog.ps1            Per-add CSV log
+  Write-ErrorLog.ps1          Per-failure CSV log
+  Get-DatedLogPath.ps1        Appends _yyyy_MM to log file names
+```
+
+## Scheduling
+
+Create a scheduled task that runs once a day, for example:
+
+```
+powershell.exe -ExecutionPolicy Bypass -File C:\Scripts\computerGroupRollout\Add-ComputersToGroup.ps1 -GroupName Deny-Login
+```
+
+Runs become no-ops once every OU in the list has been completed.
